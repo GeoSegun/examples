@@ -1,6 +1,7 @@
 # Tutorial: Collaborative Pre-Merge Testing for Multi-PR Features
 
 When new features span multiple microservices, testing becomes a major challenge. Coordinated changes across separate pull requests (PRs) must be validated together before merging. This tutorial provides a hands-on guide to building an automated system using Signadot that creates unified, ephemeral preview environments for all PRs related to a single feature epic.
+
 This technical guide is a comprehensive, step-by-step resource for:
 
 - Setting up a collaborative pre-merge testing environment with Signadot and HotROD
@@ -27,7 +28,7 @@ Before you begin, you need a functioning Kubernetes cluster with the HotROD demo
   ```
 
 - **Install the Signadot CLI:**
-  
+
   ```bash
   curl -sSLf https://raw.githubusercontent.com/signadot/cli/main/scripts/install.sh | sh
   signadot auth login
@@ -38,48 +39,30 @@ Before you begin, you need a functioning Kubernetes cluster with the HotROD demo
 
 ### 1.2. Deploy the HotROD Demo Application
 
-HotROD is a demo ride-sharing app with four main services: frontend, route, driver, and location.
+**Refer to the [HotROD README](https://github.com/signadot/hotrod) for installation steps.**
+
+The HotROD YAMLs will automatically add the necessary annotations for Signadot integration. Follow the installation instructions in the HotROD README file.
 
 ```bash
-cd hotrod
-# Or clone directly from the official repo
 git clone https://github.com/signadot/hotrod.git
-# Create a namespace
-kubectl create namespace hotrod
-# Deploy using the Istio overlay for routing capabilities
-kubectl -n hotrod apply -k k8s/overlays/prod/istio
+cd hotrod
+# Follow the installation instructions in the HotROD README
 ```
-
-#### Troubleshooting: Istio and Resource Issues
-
-- If you see errors about `VirtualService` not found, **Istio is not installed**. Install Istio:
-
-  ```bash
-  curl -L https://istio.io/downloadIstio | sh -
-  cd istio-*
-  export PATH=$PWD/bin:$PATH
-  istioctl install --set profile=demo -y
-  ```
-
-  Then re-apply the HotROD deployment.
-- If pods are stuck in `ContainerCreating` or `Pending`, check for resource issues. Increase Minikube resources if needed:
-
-  ```bash
-  minikube delete
-  minikube start --cpus=3 --memory=4096
-  ```
-
-- If you see `ImagePullBackOff`, ensure the image exists or use the baseline image.
 
 ### 1.3. Verify the Baseline
 
-Confirm the application is running correctly by forwarding a local port to the frontend service:
+Connect to your cluster and access the application:
 
 ```bash
-kubectl -n hotrod port-forward svc/frontend 8080:8080
+signadot local connect --cluster=<your-cluster-name>
 ```
 
-Open [http://localhost:8080](http://localhost:8080) in your browser. Request a ride by selecting a pickup and dropoff location. A successful request will display a car on a map, confirming the baseline is working.
+Then access the frontend using the in-cluster URL: [http://frontend.hotrod.svc:8080](http://frontend.hotrod.svc:8080)
+
+Request a ride by selecting a pickup and dropoff location. A successful request will display a car on a map, confirming the baseline is working.
+
+![Baseline HotROD App](./images/demoapp.png)
+![Baseline HotROD App](./images/reqaride.png)
 
 #### Additional Troubleshooting and Fixes
 
@@ -88,30 +71,21 @@ Open [http://localhost:8080](http://localhost:8080) in your browser. Request a r
   ```bash
   kubectl -n signadot delete secret cluster-agent
   kubectl -n signadot create secret generic cluster-agent --from-literal=token='<NEW_TOKEN_HERE>'
-  # Restart the operator if needed
+  # Restart the operator
   kubectl rollout restart deployment signadot-operator -n <namespace>
   ```
-
-- If sandboxes are stuck as "Not Ready: DevMesh Sidecar absent on baseline ...", inject the DevMesh sidecar:
-
-  ```bash
-  kubectl -n hotrod patch deployment route -p '{"spec":{"template":{"metadata":{"annotations":{"sidecar.signadot.com/inject":"true"}}}}}'
-  kubectl -n hotrod patch deployment frontend -p '{"spec":{"template":{"metadata":{"annotations":{"sidecar.signadot.com/inject":"true"}}}}}'
-  ```
-
-  Wait for the new pods to be running before proceeding.
 
 ---
 
 ## 2. The Scenario: Implementing "Dynamic Surcharges"
 
-When new features span multiple microservices, testing becomes a major challenge. Coordinated changes across separate pull requests (PRs) must be validated together before merging. This scenario demonstrates a real-world example: implementing a "Dynamic Surcharges" feature in the HotROD demo app, which requires changes to both the backend (`route` service) and frontend services. All work for this feature is tracked under the identifier `EPIC-42`.
+This scenario demonstrates a real-world example: implementing a "Dynamic Surcharges" feature in the HotROD demo app, which requires changes to both the backend (`route` service) and frontend services. All work for this feature is tracked under the identifier `EPIC-42`.
 
 ### 2.1 Backend Change: route Service
 
 Add a new gRPC endpoint to the route service to calculate the surcharge.
 
-**Edit `pkg/route/route.proto`:**
+**Edit `services/route/route.proto`:**
 
 ```proto
 // Add these message definitions
@@ -124,8 +98,8 @@ message SurchargeResponse {
     double amount = 1;
 }
 
-service Route {
-  rpc GetRoute(RouteRequest) returns (RouteResponse);
+service RoutesService {
+  rpc FindRoute(FindRouteRequest) returns (FindRouteResponse);
   // Add this new RPC
   rpc GetSurcharge(SurchargeRequest) returns (SurchargeResponse);
 }
@@ -134,14 +108,32 @@ service Route {
 **Implement the server logic in `services/route/server.go`:**
 
 ```go
-// Add this method to the server struct
-func (s *server) GetSurcharge(ctx context.Context, req *route.SurchargeRequest) (*route.SurchargeResponse, error) {
+// Add this method to the Server struct
+func (s *Server) GetSurcharge(ctx context.Context, req *SurchargeRequest) (*SurchargeResponse, error) {
     s.logger.For(ctx).Info("Calculating surcharge", zap.String("pickup", req.Pickup), zap.String("dropoff", req.Dropoff))
     // In a real application, you would have logic to determine the surcharge.
     // For this tutorial, we'll return a fixed amount.
-    return &route.SurchargeResponse{
+    return &SurchargeResponse{
         Amount: 1.25,
     }, nil
+}
+```
+
+**Add the client method in `services/route/client.go`:**
+
+```go
+func (c *Client) GetSurcharge(ctx context.Context, pickup, dropoff string) (*SurchargeResponse, error) {
+    c.logger.For(ctx).Info("Getting surcharge", zap.String("pickup", pickup), zap.String("dropoff", dropoff))
+    ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
+    defer cancel()
+    response, err := c.client.GetSurcharge(ctx, &SurchargeRequest{
+        Pickup:  pickup,
+        Dropoff: dropoff,
+    })
+    if err != nil {
+        return nil, err
+    }
+    return response, nil
 }
 ```
 
@@ -152,30 +144,115 @@ Modify the frontend service to call the new `GetSurcharge` endpoint and display 
 **Update the frontend server in `services/frontend/server.go`:**
 
 ```go
-// In services/frontend/server.go, inside dispatchHandler
+// Add import for route client
+import route "github.com/signadot/hotrod/services/route"
 
-// Create a SurchargeRequest
-surchargeReq := &route.SurchargeRequest{
-    Pickup:  r.FormValue("pickup"),
-    Dropoff: r.FormValue("dropoff"),
+// Add routeClient field to Server struct
+type Server struct {
+    // ... existing fields ...
+    routeClient *route.Client
 }
 
-// Call the new GetSurcharge endpoint
-surchargeRes, err := s.routeClient.GetSurcharge(ctx, surchargeReq)
-if err!= nil {
-    s.logger.For(ctx).Error("Failed to get surcharge", zap.Error(err))
-    // Decide how to handle the error; for now, we'll ignore it and proceed
+// Initialize routeClient in NewServer function
+func NewServer(options ConfigOptions, logger log.Factory) *Server {
+    // ... existing code ...
+    routeClient := route.NewClient(tracerProvider, logger, options.RouteHostPort)
+    
+    return &Server{
+        // ... existing fields ...
+        routeClient: routeClient,
+    }
 }
 
-// Existing logic to dispatch the ride...
-//...
-
-// Pass the surcharge amount to the template
-templateData := map[string]interface{}{
-    "locations": locations,
-    "surcharge": surchargeRes.GetAmount(), // Add this line
+// Add surcharge handler
+func (s *Server) surcharge(w http.ResponseWriter, r *http.Request) {
+    ctx := r.Context()
+    s.logger.For(ctx).Info("HTTP request received", zap.String("method", r.Method), zap.Stringer("url", r.URL))
+    
+    pickup := r.URL.Query().Get("pickup")
+    dropoff := r.URL.Query().Get("dropoff")
+    
+    if pickup == "" || dropoff == "" {
+        http.Error(w, "Missing pickup or dropoff parameters", http.StatusBadRequest)
+        return
+    }
+    
+    surchargeRes, err := s.routeClient.GetSurcharge(ctx, pickup, dropoff)
+    if err != nil {
+        s.logger.For(ctx).Error("Failed to get surcharge", zap.Error(err))
+        http.Error(w, "Failed to get surcharge", http.StatusInternalServerError)
+        return
+    }
+    
+    s.writeResponse(map[string]interface{}{
+        "surcharge": surchargeRes.Amount,
+    }, w, r)
 }
-s.render(r, w, "index", templateData)
+
+// Register the surcharge endpoint in createServeMux
+func (s *Server) createServeMux() http.Handler {
+    mux := http.NewServeMux()
+    // ... existing endpoints ...
+    mux.HandleFunc("/surcharge", s.surcharge)
+    return mux
+}
+
+// Update dispatch handler to call surcharge
+func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) {
+    // ... existing code ...
+    
+    // Get surcharge before dispatching
+    surchargeRes, err := s.routeClient.GetSurcharge(ctx, pickup, dropoff)
+    if err != nil {
+        s.logger.For(ctx).Error("Failed to get surcharge", zap.Error(err))
+        // Continue without surcharge
+    }
+    
+    // ... existing dispatch logic ...
+    
+    // Pass surcharge to template
+    templateData := map[string]interface{}{
+        "locations": locations,
+        "surcharge": surchargeRes.GetAmount(),
+    }
+    s.render(r, w, "index", templateData)
+}
+```
+
+**Update the React frontend in `services/frontend/react_app/src/pages/home.tsx`:**
+
+```tsx
+// Add surcharge state
+const [surcharge, setSurcharge] = useState<number | null>(null);
+
+// Add getSurcharge function
+const getSurcharge = async (pickupId: string, dropoffId: string) => {
+    try {
+        const response = await fetch(`/surcharge?pickup=${pickupId}&dropoff=${dropoffId}`);
+        if (response.ok) {
+            const data = await response.json();
+            setSurcharge(data.surcharge);
+        }
+    } catch (error) {
+        console.error('Failed to get surcharge:', error);
+    }
+};
+
+// Update handleRequestDrive to call surcharge
+const handleRequestDrive = async () => {
+    // ... existing code ...
+    await getSurcharge(pickupId, dropoffId);
+    // ... rest of the function ...
+};
+
+// Add surcharge display in JSX
+{surcharge && (
+    <Box p={3} bg="yellow.100" borderRadius="md" border="1px solid" borderColor="yellow.300">
+        <Text fontWeight="bold" color="yellow.800">
+            Dynamic Surcharge Applied: ${surcharge.toFixed(2)}
+        </Text>
+    </Box>
+)}
 ```
 
 **Update the UI template in `services/frontend/templates/index.html`:**
@@ -190,65 +267,35 @@ s.render(r, w, "index", templateData)
 <div id="ride-info" class="p-2"></div>
 ```
 
-After making these changes, you would typically build new container images for both services (e.g., `your-repo/hotrod-route:epic-42` and `your-repo/hotrod-frontend:epic-42`) and push them to a registry. For the main workflow in this guide, pre-built images or the baseline image are used, but this section is provided for teams who wish to implement and test the feature end-to-end.
+### 2.3 Build New Docker Images
+
+**When you create the sandboxes, they need to use a new image - the one that has the code changes for the new feature.**
+
+After making the code changes, build new container images:
+
+```bash
+# Generate Go code from proto files
+cd hotrod
+make generate-proto
+
+# Build the React frontend
+make build-frontend-app
+
+# Build the Docker image with all changes
+make build-docker
+
+# Tag and push the image
+docker tag hotrod:latest <your-dockerhub-username>/hotrod:epic-42
+docker push <your-dockerhub-username>/hotrod:epic-42
+```
+
+**Note:** Replace `<your-dockerhub-username>` with your actual Docker Hub username or registry path.
 
 ---
 
 ## 3. Manual Workflow: Unified Preview with Signadot
 
-### 3.1. Inject the DevMesh Sidecar (Required for Sandboxes)
-
-To enable Signadot sandboxes, you must inject the DevMesh sidecar into the baseline deployments you wish to fork. This is done by adding an annotation to the deployment's pod template.
-
-**Patch the `route` deployment:**
-
-```bash
-kubectl -n hotrod patch deployment route -p '{
-  "spec": {
-    "template": {
-      "metadata": {
-        "annotations": {
-          "sidecar.signadot.com/inject": "true"
-        }
-      }
-    }
-  }
-}'
-```
-
-**Patch the `frontend` deployment:**
-
-```bash
-kubectl -n hotrod patch deployment frontend -p '{
-  "spec": {
-    "template": {
-      "metadata": {
-        "annotations": {
-          "sidecar.signadot.com/inject": "true"
-        }
-      }
-    }
-  }
-}'
-```
-
-Wait for the new pods to be created and reach the `Running` state:
-
-```bash
-kubectl -n hotrod get pods
-```
-
-**Verify the sidecar is present:**
-
-```bash
-kubectl -n hotrod describe pod <route-pod-name>
-```
-
-Look for an extra container in the pod spec, typically named `devmesh` or similar.
-
----
-
-#### 3.2. Create Sandboxes for Each Service
+### 3.1. Create Sandboxes for Each Service
 
 Create `route-surcharge-sandbox.yaml`:
 
@@ -263,6 +310,9 @@ spec:
         kind: Deployment
         namespace: hotrod
         name: route
+      customizations:
+        images:
+          - image: <your-dockerhub-username>/hotrod:epic-42
 ```
 
 Create `frontend-surcharge-sandbox.yaml`:
@@ -278,6 +328,12 @@ spec:
         kind: Deployment
         namespace: hotrod
         name: frontend
+      customizations:
+        images:
+          - image: <your-dockerhub-username>/hotrod:epic-42
+        env:
+          - name: FRONTEND_ROUTE_ADDR
+            value: "route-surcharge-feature-dep-route-<unique-id>.hotrod.svc:8083"
 ```
 
 Apply the sandboxes:
@@ -287,11 +343,12 @@ signadot sandbox apply -f route-surcharge-sandbox.yaml --set cluster=<your-clust
 signadot sandbox apply -f frontend-surcharge-sandbox.yaml --set cluster=<your-cluster-name>
 ```
 
+**Important:** In your cluster, there will be 2 versions of the frontend and route deployments (baseline & sandbox).
+
 **Troubleshooting:**
 
 - If you see `Insufficient cpu` errors, increase Minikube resources (see above). The Signadot traffic manager sidecars require significant CPU.
 - If you see `ImagePullBackOff` for custom images, ensure the image exists in your registry or use the baseline image.
-- If you see `DevMesh Sidecar absent on baseline ...`, ensure you have injected the sidecar as described above.
 - If pods are stuck in `Pending`, describe them:
 
   ```bash
@@ -300,7 +357,7 @@ signadot sandbox apply -f frontend-surcharge-sandbox.yaml --set cluster=<your-cl
 
   Look for resource or image pull errors.
 
-#### 3.3. Create a RouteGroup
+### 3.2. Create a RouteGroup
 
 Create `epic-routegroup.yaml`:
 
@@ -315,7 +372,9 @@ spec:
           value: EPIC-42
   endpoints:
     - name: hotrod-frontend
-      target: http://frontend.hotrod.svc:8080
+      target: http://frontend-surcharge-feature-dep-frontend-<unique-id>.hotrod.svc:8080
+    - name: hotrod-route
+      target: http://route-surcharge-feature-dep-route-<unique-id>.hotrod.svc:8083
 ```
 
 Apply it:
@@ -324,24 +383,34 @@ Apply it:
 signadot routegroup apply -f epic-routegroup.yaml --set cluster=<your-cluster-name>
 ```
 
-#### 3.4. Test the Unified Preview
+### 3.3. Test the Unified Preview
 
 - Install the [Signadot Chrome Extension](https://chrome.google.com/webstore/detail/signadot/)
 - Log in and select the `epic-42-preview` RouteGroup
-- Visit [http://localhost:8080](http://localhost:8080)
-- Request a ride; you should see **Dynamic Surcharge Applied: $1.25** (if using custom images)
+- Access the application using the RouteGroup URL: `https://hotrod-frontend--epic-42-preview.preview.signadot.com`
+- Request a ride; you should see **Dynamic Surcharge Applied: $1.25**
+
+![New Version with Dynamic Surcharges](./images/dynamicsurcharge.png)
+
+![Sandbox Selection in Chrome Extension](./images/ext.png)
+
+Signadot Dashboard(Cluster)
+![Signadot Dashboard showing cluster](./images/cluster.png)
+
+Signadot Dashboard(Sandboxes)
+![Signadot Dashboard showing sandboxes](./images/sandboxes.png)
+
+Signadot Dashboard(Route Group)
+![Signadot Dashboard showing routegroup](./images/rg.png)
 
 ---
 
-### 4. Troubleshooting & Real-World Notes
+## 4. Troubleshooting & Real-World Notes
 
-- Always ensure Istio is installed before applying HotROD overlays.
+- Always ensure your cluster is properly connected to Signadot before creating sandboxes.
 - If you have limited resources, you may need to use a cloud Kubernetes cluster.
 - The Signadot traffic manager sidecars have high default CPU requests; these cannot be changed in the sandbox YAML.
-- If you want to implement the code changes yourself (Step 2 in the original guide), you’ll need to:
-  - Edit the Go and proto files
-  - Build and push your own Docker images
-  - Update the sandbox YAMLs to use your images
+- Your cluster will now have two versions of frontend and route deployments: the baseline version and the sandbox version with your new feature.
 - If you delete and recreate your cluster in the Signadot dashboard, ensure you update the cluster token secret in your Kubernetes cluster and restart the operator if needed.
 
 ---
@@ -353,9 +422,9 @@ signadot routegroup apply -f epic-routegroup.yaml --set cluster=<your-cluster-na
 Automate the creation and management of Signadot sandboxes and RouteGroups for every pull request and epic using GitHub Actions. This enables fully automated ephemeral preview environments for collaborative testing.
 
 > **Professional Note:**
-> The automation workflows and templates provided here are based on Signadot's official patterns and best practices. They are designed to work when correct parameters, secrets, and valid container images are supplied. However, as with any CI/CD automation, you should validate these workflows in your environment and adapt as needed for your specific use case and infrastructure.
+> The automation workflows and templates provided here are based on Signadot's official patterns and best practices. They are designed to work when correct parameters, secrets, and valid container images are supplied. However, as with any CI/CD automation, users should validate these workflows in their own environment and adapt as needed for their specific use case and infrastructure.
 
-#### 5.2. Required Templates
+### 5.2. Required Templates
 
 - **Sandbox template:** `.signadot/sandbox-template.yaml`
 - **RouteGroup template:** `.signadot/routegroup-template.yaml`
@@ -396,7 +465,7 @@ spec:
       target: http://frontend.hotrod.svc:8080
 ```
 
-#### 5.3. Add Required GitHub Secrets
+### 5.3. Add Required GitHub Secrets
 
 In your repository settings, add the following secrets:
 
@@ -404,7 +473,7 @@ In your repository settings, add the following secrets:
 - `SIGNADOT_ORG` (your Signadot organization name)
 - `SIGNADOT_CLUSTER` (your Signadot cluster name)
 
-#### 5.4. Workflow 1: Create Sandbox on PR
+### 5.4. Workflow 1: Create Sandbox on PR
 
 Create `.github/workflows/create-pr-sandbox.yml`:
 
@@ -443,7 +512,7 @@ jobs:
             --set labels."signadot/github-repo"="${{ github.repository }}"
 ```
 
-#### 5.5. Workflow 2: Link Epic via PR Comment
+### 5.5. Workflow 2: Link Epic via PR Comment
 
 Create `.github/workflows/link-epic-preview.yml`:
 
@@ -503,12 +572,9 @@ jobs:
             Preview URL: **${{ steps.routegroup.outputs.preview_url }}**
 ```
 
-## 6. Lifecycle Management: Automated Cleanup
+### Conclusion
 
-Ephemeral environments should be cleaned up automatically to save resources. Signadot provides two simple mechanisms for this:
-
-**Time-To-Live (TTL):** You can define a ttl field in the specification for both Sandboxes and RouteGroups. This ensures the resource is automatically deleted after a specified duration (e.g., 2d for two days), preventing orphaned environments.
-
-**PR-Based Deletion:** By installing the [https://www.signadot.com/docs/guides/integrate-ci/github](https://www.signadot.com/docs/guides/integrate-ci/github) and adding `signadot/github-repo` and `signadot/github-pull-request` labels to your sandboxes (as shown in the automation examples), Signadot will automatically delete the associated sandbox when the corresponding PR is closed or merged.
+This tutorial demonstrated how to build collaborative pre-merge testing for multi-PR features using Signadot. We successfully implemented a `Dynamic Surcharges` feature across multiple microservices, created isolated sandboxes, unified them through RouteGroups, and established automated workflows.
+The approach provides isolated testing environments for each PR while enabling unified preview of integrated features. This methodology scales from manual testing to full automation, making it suitable for teams testing complex, multi-service features in production-like conditions.
 
 ---

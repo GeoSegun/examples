@@ -8,6 +8,17 @@ spec:
         kind: Deployment
         namespace: hotrod
         name: route
-      # customizations:
-      #   images:
-      #     - image: signadot/hotrod:latest
+      customizations:
+        images:
+          - image: asruf/hotrod:epic-42
+        # env:
+        #   - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        #     value: ""
+        #   - name: OTEL_TRACES_SAMPLER
+        #     value: "off"
+        #   - name: OTEL_METRICS_EXPORTER
+        #     value: "none"
+        #   - name: OTEL_LOGS_EXPORTER
+        #     value: "none"
+        #   - name: OTEL_SDK_DISABLED
+        #     value: "true"

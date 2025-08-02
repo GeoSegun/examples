@@ -8,6 +8,9 @@ spec:
         kind: Deployment
         namespace: hotrod
         name: frontend
-      # customizations:
-      #   images:
-      #     - image: signadot/hotrod:latest
+      customizations:
+        images:
+          - image: asruf/hotrod:epic-42
+        env:
+          - name: FRONTEND_ROUTE_ADDR
+            value: "route-surcharge-feature-dep-route-e2b10069.hotrod.svc:8083"
