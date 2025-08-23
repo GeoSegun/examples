@@ -16,27 +16,6 @@ This technical guide is a comprehensive, step-by-step resource for:
 
 ## 1. Prerequisites and Baseline Environment Setup
 
-Before you begin, you need a functioning Kubernetes cluster with the HotROD demo application deployed and connected to Signadot.
-
-### 1.1. Install Signadot and Set Up Your Cluster
-
-- **Create a Signadot account:** [Signadot Official Docs](https://www.signadot.com/docs/overview)
-- **Connect your Kubernetes cluster:** Follow the onboarding instructions in the Signadot dashboard to connect your cluster. This typically involves downloading a YAML file and applying it:
-
-  ```bash
-  kubectl apply -f <signadot-operator-yaml>
-  ```
-
-- **Install the Signadot CLI:**
-
-  ```bash
-  curl -sSLf https://raw.githubusercontent.com/signadot/cli/main/scripts/install.sh | sh
-  signadot auth login
-  signadot cluster list
-  ```
-
-  Ensure your cluster appears as "ready" in the Signadot dashboard.
-
 ### 1.2. Deploy the HotROD Demo Application
 
 **Refer to the [HotROD README](https://github.com/signadot/hotrod) for installation steps.**
@@ -63,19 +42,8 @@ Request a ride by selecting a pickup and dropoff location. A successful request 
 
 ![Baseline HotROD App](./images/demoapp.png)
 ![Baseline HotROD App](./images/reqaride.png)
-
-#### Additional Troubleshooting and Fixes
-
-- If the Signadot dashboard shows your cluster as "not connected" after authentication, ensure you have applied the correct cluster token secret. If you deleted and recreated the cluster in the dashboard, update the secret:
-
-  ```bash
-  kubectl -n signadot delete secret cluster-agent
-  kubectl -n signadot create secret generic cluster-agent --from-literal=token='<NEW_TOKEN_HERE>'
-  # Restart the operator
-  kubectl rollout restart deployment signadot-operator -n <namespace>
-  ```
-
----
+![Baseline HotROD App](./images/arrtime.png)
+![Baseline HotROD App](./images/cararrived.png)
 
 ## 2. The Scenario: Implementing "Dynamic Surcharges"
 
@@ -95,7 +63,7 @@ message SurchargeRequest {
 }
 
 message SurchargeResponse {
-    double amount = 1;
+  double amount = 1;
 }
 
 service RoutesService {
@@ -111,6 +79,7 @@ service RoutesService {
 // Add this method to the Server struct
 func (s *Server) GetSurcharge(ctx context.Context, req *SurchargeRequest) (*SurchargeResponse, error) {
     s.logger.For(ctx).Info("Calculating surcharge", zap.String("pickup", req.Pickup), zap.String("dropoff", req.Dropoff))
+    
     // In a real application, you would have logic to determine the surcharge.
     // For this tutorial, we'll return a fixed amount.
     return &SurchargeResponse{
@@ -285,13 +254,13 @@ make build-frontend-app
 make build-docker
 
 # Tag and push the image
-docker tag hotrod:latest <your-dockerhub-username>/hotrod:epic-42
-docker push <your-dockerhub-username>/hotrod:epic-42
+docker tag signadot/hotrod:epic-42-surcharge-only-linux-amd64 <your-dockerhub-username>/hotrod:epic-42-surcharge-only
+docker push <your-dockerhub-username>/hotrod:epic-42-surcharge-only
 ```
 
-**Note:** Replace `<your-dockerhub-username>` with your actual Docker Hub username or registry path.
-
 ---
+
+**Note:** Replace `<your-dockerhub-username>` with your actual Docker Hub username or registry path.
 
 ## 3. Manual Workflow: Unified Preview with Signadot
 
@@ -312,7 +281,7 @@ spec:
         name: route
       customizations:
         images:
-          - image: <your-dockerhub-username>/hotrod:epic-42
+          - image: <your-dockerhub-username>/hotrod:epic-42-surcharge-only
 ```
 
 Create `frontend-surcharge-sandbox.yaml`:
@@ -330,10 +299,7 @@ spec:
         name: frontend
       customizations:
         images:
-          - image: <your-dockerhub-username>/hotrod:epic-42
-        env:
-          - name: FRONTEND_ROUTE_ADDR
-            value: "route-surcharge-feature-dep-route-<unique-id>.hotrod.svc:8083"
+          - image: <your-dockerhub-username>/hotrod:epic-42-surcharge-only
 ```
 
 Apply the sandboxes:
@@ -345,19 +311,23 @@ signadot sandbox apply -f frontend-surcharge-sandbox.yaml --set cluster=<your-cl
 
 **Important:** In your cluster, there will be 2 versions of the frontend and route deployments (baseline & sandbox).
 
-**Troubleshooting:**
+### 3.2. Understanding the Testing Use-Case
 
-- If you see `Insufficient cpu` errors, increase Minikube resources (see above). The Signadot traffic manager sidecars require significant CPU.
-- If you see `ImagePullBackOff` for custom images, ensure the image exists in your registry or use the baseline image.
-- If pods are stuck in `Pending`, describe them:
+Before discussing RouteGroups, it's important to understand the testing scenarios we need to cover. In our "Dynamic Surcharges" feature, we have:
 
-  ```bash
-  kubectl -n hotrod describe pod <pod-name>
-  ```
+- **fe1**: Baseline frontend (original version)
+- **fe2**: New frontend with surcharge feature
+- **r1**: Baseline route service (original version)
+- **r2**: New route service with surcharge API
 
-  Look for resource or image pull errors.
+The following combinations can be tested:
 
-### 3.2. Create a RouteGroup
+1. **fe1 → r1** (both baseline) - This is just testing the baseline versions to ensure nothing is broken
+2. **fe1 → r2** - To ensure changes in r2 haven't broken fe1. Here you can select the sandbox corresponding to r2 and use fe1
+3. **fe2 → r1** - This is expected to fail as fe2 depends on new APIs in r2, but you can test whether fe2 handles this gracefully. Here you select the sandbox corresponding to fe2 in the chrome extension
+4. **fe2 → r2** - This is where we test the new feature end-to-end and here's where RouteGroups are used as detailed in the next section. RouteGroups combine multiple sandbox contexts into one with its own unique routing key
+
+### 3.3. Create a RouteGroup
 
 Create `epic-routegroup.yaml`:
 
@@ -372,9 +342,7 @@ spec:
           value: EPIC-42
   endpoints:
     - name: hotrod-frontend
-      target: http://frontend-surcharge-feature-dep-frontend-<unique-id>.hotrod.svc:8080
-    - name: hotrod-route
-      target: http://route-surcharge-feature-dep-route-<unique-id>.hotrod.svc:8083
+      target: http://frontend.hotrod.svc:8080
 ```
 
 Apply it:
@@ -383,7 +351,7 @@ Apply it:
 signadot routegroup apply -f epic-routegroup.yaml --set cluster=<your-cluster-name>
 ```
 
-### 3.3. Test the Unified Preview
+### 3.4. Test the Unified Preview
 
 - Install the [Signadot Chrome Extension](https://chrome.google.com/webstore/detail/signadot/)
 - Log in and select the `epic-42-preview` RouteGroup
@@ -405,67 +373,16 @@ Signadot Dashboard(Route Group)
 
 ---
 
-## 4. Troubleshooting & Real-World Notes
+## 4. Automation: GitHub Actions Integration
 
-- Always ensure your cluster is properly connected to Signadot before creating sandboxes.
-- If you have limited resources, you may need to use a cloud Kubernetes cluster.
-- The Signadot traffic manager sidecars have high default CPU requests; these cannot be changed in the sandbox YAML.
-- Your cluster will now have two versions of frontend and route deployments: the baseline version and the sandbox version with your new feature.
-- If you delete and recreate your cluster in the Signadot dashboard, ensure you update the cluster token secret in your Kubernetes cluster and restart the operator if needed.
-
----
-
-## 5. Automation: GitHub Actions Integration
-
-### 5.1. Overview
+### 4.1. Overview
 
 Automate the creation and management of Signadot sandboxes and RouteGroups for every pull request and epic using GitHub Actions. This enables fully automated ephemeral preview environments for collaborative testing.
 
 > **Professional Note:**
 > The automation workflows and templates provided here are based on Signadot's official patterns and best practices. They are designed to work when correct parameters, secrets, and valid container images are supplied. However, as with any CI/CD automation, users should validate these workflows in their own environment and adapt as needed for their specific use case and infrastructure.
 
-### 5.2. Required Templates
-
-- **Sandbox template:** `.signadot/sandbox-template.yaml`
-- **RouteGroup template:** `.signadot/routegroup-template.yaml`
-
-**.signadot/sandbox-template.yaml**
-
-```yaml
-name: "${name}"
-spec:
-  cluster: "${cluster}"
-  labels:
-    signadot/github-pull-request: "${signadot/github-pull-request}"
-    signadot/github-repo: "${signadot/github-repo}"
-    epic: "${epic}"
-  forks:
-    - forkOf:
-        kind: Deployment
-        namespace: hotrod
-        name: ${service}
-      customizations:
-        images:
-          - image: ${image}
-```
-
-**.signadot/routegroup-template.yaml**
-
-```yaml
-name: "${name}"
-spec:
-  cluster: "${cluster}"
-  match:
-    any:
-      - label:
-          key: epic
-          value: "${match_value}"
-  endpoints:
-    - name: hotrod-frontend
-      target: http://frontend.hotrod.svc:8080
-```
-
-### 5.3. Add Required GitHub Secrets
+### 4.2. Add Required GitHub Secrets
 
 In your repository settings, add the following secrets:
 
@@ -473,7 +390,7 @@ In your repository settings, add the following secrets:
 - `SIGNADOT_ORG` (your Signadot organization name)
 - `SIGNADOT_CLUSTER` (your Signadot cluster name)
 
-### 5.4. Workflow 1: Create Sandbox on PR
+### 4.3. Workflow 1: Create Sandbox on PR
 
 Create `.github/workflows/create-pr-sandbox.yml`:
 
@@ -490,29 +407,54 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # (Optional) Build and push your image
-      # - name: Build and push image
-      #   run: |
-      #     docker build -t your-registry/hotrod:${{ github.sha }} .
-      #     docker push your-registry/hotrod:${{ github.sha }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker image
+        run: |
+          cd hotrod
+          make build-frontend-app
+          make build-docker
+          docker tag signadot/hotrod:epic-42-surcharge-only-linux-amd64 <your-dockerhub-username>/hotrod:pr-${{ github.event.pull_request.number }}
+          docker push <your-dockerhub-username>/hotrod:pr-${{ github.event.pull_request.number }}
 
       - name: Install Signadot CLI
         run: curl -sSLf https://raw.githubusercontent.com/signadot/cli/main/scripts/install.sh | sh
+
+      - name: Create Sandbox YAML
+        run: |
+          cat > temp-sandbox.yaml << EOF
+          name: "pr-${{ github.event.pull_request.number }}"
+          spec:
+            cluster: "${{ secrets.SIGNADOT_CLUSTER }}"
+            labels:
+              github-pull-request: "${{ github.event.pull_request.number }}"
+              github-repo: "${{ github.repository }}"
+            forks:
+              - forkOf:
+                  kind: Deployment
+                  namespace: hotrod
+                  name: frontend
+                customizations:
+                  images:
+                    - image: "<your-dockerhub-username>/hotrod:pr-${{ github.event.pull_request.number }}"
+          EOF
 
       - name: Apply Sandbox
         env:
           SIGNADOT_API_KEY: ${{ secrets.SIGNADOT_API_KEY }}
           SIGNADOT_ORG: ${{ secrets.SIGNADOT_ORG }}
         run: |
-          signadot sandbox apply -f .signadot/sandbox-template.yaml \
-            --set cluster=${{ secrets.SIGNADOT_CLUSTER }} \
-            --set name="pr-${{ github.event.pull_request.number }}" \
-            --set image="your-registry/hotrod:${{ github.sha }}" \
-            --set labels."signadot/github-pull-request"="${{ github.event.pull_request.number }}" \
-            --set labels."signadot/github-repo"="${{ github.repository }}"
+          signadot sandbox apply -f temp-sandbox.yaml
 ```
 
-### 5.5. Workflow 2: Link Epic via PR Comment
+### 4.4. Workflow 2: Link Epic via PR Comment
 
 Create `.github/workflows/link-epic-preview.yml`:
 
@@ -532,45 +474,77 @@ jobs:
         run: |
           EPIC_ID=$(echo "${{ github.event.comment.body }}" | awk '{print $2}')
           echo "EPIC_ID=${EPIC_ID}" >> $GITHUB_ENV
-
       - name: Install Signadot CLI
         run: curl -sSLf https://raw.githubusercontent.com/signadot/cli/main/scripts/install.sh | sh
 
+      - name: Create Sandbox YAML with Epic Label
+        run: |
+          cat > temp-sandbox.yaml << EOF
+          name: "pr-${{ github.event.issue.number }}"
+          spec:
+            cluster: "${{ secrets.SIGNADOT_CLUSTER }}"
+            labels:
+              epic: "${{ env.EPIC_ID }}"
+              github-pull-request: "${{ github.event.issue.number }}"
+              github-repo: "${{ github.repository }}"
+            forks:
+              - forkOf:
+                  kind: Deployment
+                  namespace: hotrod
+                  name: frontend
+                customizations:
+                  images:
+                    - image: "<your-dockerhub-username>/hotrod:pr-${{ github.event.pull_request.number }}"
+          EOF
       - name: Update Sandbox with Epic Label
         env:
           SIGNADOT_API_KEY: ${{ secrets.SIGNADOT_API_KEY }}
           SIGNADOT_ORG: ${{ secrets.SIGNADOT_ORG }}
         run: |
-          signadot sandbox apply -f .signadot/sandbox-template.yaml \
-            --set cluster=${{ secrets.SIGNADOT_CLUSTER }} \
-            --set name="pr-${{ github.event.issue.number }}" \
-            --set image="your-registry/hotrod:${{ github.event.pull_request.head.sha }}" \
-            --set labels."epic"="${{ env.EPIC_ID }}" \
-            --set labels."signadot/github-pull-request"="${{ github.event.issue.number }}" \
-            --set labels."signadot/github-repo"="${{ github.repository }}"
-
+          signadot sandbox apply -f temp-sandbox.yaml
+      - name: Create RouteGroup YAML
+        run: |
+          cat > temp-routegroup.yaml << EOF
+          name: "epic${{ env.EPIC_ID }}preview"
+          spec:
+            cluster: "${{ secrets.SIGNADOT_CLUSTER }}"
+            match:
+              all:
+                - label:
+                    key: epic
+                    value: "${{ env.EPIC_ID }}"
+                - label:
+                    key: github-pull-request
+                    value: "${{ github.event.issue.number }}"
+            
+          EOF
       - name: Create or Update Epic RouteGroup
         id: routegroup
         env:
           SIGNADOT_API_KEY: ${{ secrets.SIGNADOT_API_KEY }}
           SIGNADOT_ORG: ${{ secrets.SIGNADOT_ORG }}
         run: |
-          signadot routegroup apply -f .signadot/routegroup-template.yaml \
-            --set cluster=${{ secrets.SIGNADOT_CLUSTER }} \
-            --set name="epic-${{ env.EPIC_ID }}-preview" \
-            --set match_value="${{ env.EPIC_ID }}"
-
-          RG_URL=$(signadot routegroup get epic-${{ env.EPIC_ID }}-preview -o jsonpath='{.endpoints.url}')
+          signadot routegroup apply -f temp-routegroup.yaml
+          RG_URL="https://hotrod-frontend--epic${{ env.EPIC_ID }}preview.preview.signadot.com"
           echo "preview_url=${RG_URL}" >> $GITHUB_OUTPUT
-
       - name: Post Preview URL back to PR
         uses: peter-evans/create-or-update-comment@v4
         with:
           issue-number: ${{ github.event.issue.number }}
           body: |
             ✅ Unified preview for **${{ env.EPIC_ID }}** is ready!
-            Preview URL: **${{ steps.routegroup.outputs.preview_url }}**
+            Preview URL: **${{ steps.routegroup.outputs.preview_url }}** 
 ```
+
+**Screenshots:**
+User commenting /epic EPIC-42 on a PR
+![User commenting /epic EPIC-42 on a PR](./images/comment.png)
+
+GitHub Action workflow running
+![GitHub Action workflow running](./images/workflow.png)
+
+Preview URL response in PR
+![Preview URL response in PR](./images/preview.png)
 
 ### Conclusion
 
