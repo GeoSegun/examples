@@ -1,0 +1,44 @@
+# * Signadot sandbox configuration
+# * Defines how Signadot clones workloads, overrides config, and routes traffic
+apiVersion: signadot.com/v1
+kind: Sandbox
+# * Sandbox name will be replaced by workflow with PR-specific name
+# * Format: backend-pr-{PR_NUMBER}
+name: backend-pr-${PR_NUMBER}
+spec:
+  # * Cluster where the sandbox will be created
+  cluster: default
+  
+  # * Description of the sandbox
+  description: Sandbox environment for vercel-signadot-backend
+  
+  # * Workloads to clone and customize
+  forks:
+    - forkOf:
+        # * Kubernetes resource to clone
+        kind: Deployment
+        namespace: default
+        name: vercel-signadot-backend
+      customizations:
+        # * Image override for sandbox
+        # * Signadot will replace this with the image from the workflow
+        # * Format: docker.io/USERNAME/IMAGE_NAME:TAG
+        images:
+          - image: docker.io/${DOCKERHUB_USERNAME}/vercel-signadot-backend:${SANDBOX_IMAGE_TAG}
+        # * Explicit command to ensure server starts correctly
+        # * This ensures the command is set even if base deployment doesn't specify it
+        command: ["node", "server.js"]
+        # * Environment variable overrides
+        env:
+          - name: PORT
+            value: "3000"
+  
+  # * Default route group for exposing the service
+  # * THIS IS CRITICAL: Without this, Signadot won't generate preview URLs
+  defaultRouteGroup:
+    endpoints:
+      - name: backend-api
+        # * Target must point to the Kubernetes service (not deployment)
+        # * Format: http://<service-name>.<namespace>.svc:<port>
+        target: http://vercel-signadot-backend.default.svc:3000
+

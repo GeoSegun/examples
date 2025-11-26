@@ -1,0 +1,26 @@
+# * Signadot sandbox template
+# * Used by GitHub Actions workflow to create PR-specific sandboxes
+# * Variables will be replaced: ${PR_NUMBER}, ${DOCKERHUB_USERNAME}, ${SANDBOX_IMAGE_TAG}
+apiVersion: signadot.com/v1
+kind: Sandbox
+name: backend-pr-${PR_NUMBER}
+spec:
+  cluster: default
+  description: Sandbox environment for vercel-signadot-backend
+  forks:
+    - forkOf:
+        kind: Deployment
+        namespace: default
+        name: vercel-signadot-backend
+      customizations:
+        images:
+          - image: docker.io/${DOCKERHUB_USERNAME}/vercel-signadot-backend:${SANDBOX_IMAGE_TAG}
+        command: ["node", "server.js"]
+        env:
+          - name: PORT
+            value: "3000"
+  defaultRouteGroup:
+    endpoints:
+      - name: backend-api
+        target: http://vercel-signadot-backend.default.svc:3000
+
