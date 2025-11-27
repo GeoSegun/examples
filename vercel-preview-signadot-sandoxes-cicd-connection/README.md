@@ -7,12 +7,14 @@ Modern Vercel Preview Deployments rarely track backend changes. When a frontend 
 This guide demonstrates how to:
 
 1. Build an independently deployable backend service that can be cloned for each PR.
-2. Configure a frontend (Next.js) to read the backend URL from an environment variable and secure API proxy.
+2. Configure a frontend (Next.js in this tutorial, though any framework with build-time env support works) to read the backend URL from an environment variable and secure API proxy.
 3. Use GitHub Actions to automatically create Signadot sandboxes and deploy Vercel previews.
 4. Validate that every frontend PR talks only to its matching backend instance.
 
 **Time required:** 45–60 minutes  
 **Repository:** https://github.com/signadot/examples/tree/main/vercel-preview-signadot-sandoxes-cicd-connection
+
+> **Stack note:** The sample code uses a Next.js frontend and a Node/Express backend, but the workflow applies to any framework that can read build-time environment variables and expose a stable Kubernetes deployment for Signadot to clone.
 
 ---
 
@@ -268,6 +270,25 @@ Secrets required in frontend repo:
 | Registry | `DOCKERHUB_USERNAME` (used for image rewrites) |
 
 > **Note:** This workflow uses the Signadot CLI (`signadot sandbox apply/get`). You can substitute `signadot/sandbox-action` if desired; the logic is equivalent.
+
+If you are **not** running the backend CI job with `SIGNADOT_CLUSTER_TOKEN` (which installs the operator automatically), install the Signadot Operator yourself before running this workflow. The commands below are the exact ones the backend workflow executes:
+
+```bash
+kubectl create namespace signadot
+
+helm repo add signadot https://charts.signadot.com
+helm repo update signadot
+
+kubectl create secret generic cluster-agent \
+  --from-literal=token=$SIGNADOT_CLUSTER_TOKEN \
+  -n signadot
+
+helm upgrade --install signadot-operator signadot/operator \
+  --namespace signadot \
+  --wait
+```
+
+> You can also enable the optional `deploy-to-eks` job in the backend CI workflow, which runs the same Helm installation when `SIGNADOT_CLUSTER_TOKEN` is provided.
 
 If you need a visual reference for where to retrieve the Signadot API key and how the Vercel project secrets are configured, see the screenshots below:
 
