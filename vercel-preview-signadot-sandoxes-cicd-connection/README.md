@@ -75,6 +75,12 @@ The integration works as follows:
 
 First, deploy your backend to Kubernetes. The example includes minimal backend code in the `backend/` directory.
 
+**Before deploying, update the image reference:**
+
+1. Open `k8s/deployment.yaml` (or `backend/k8s/deployment.yaml`)
+2. Replace `YOUR_REGISTRY` with your container registry (e.g., `docker.io/username` or `ghcr.io/username`)
+3. The image line should look like: `image: docker.io/username/vercel-signadot-backend:latest`
+
 **Deploy to Kubernetes:**
 
 ```bash
