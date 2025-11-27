@@ -284,7 +284,8 @@ If you need a visual reference for where to retrieve the Signadot API key and ho
    ![Frontend workflow run](./images/successful_frontend_job.png)
 3. **Verify backend pipeline (optional):** The backend CI workflow should have already produced the image tag that the sandbox consumes.  
    ![Backend workflow run](./images/successful_backend_workflow.png)
-4. **Find the PR comment:** The workflow posts both the frontend preview and backend sandbox URLs.
+4. **Find the PR comment:** The workflow posts both the frontend preview and backend sandbox URLs.  
+   ![GitHub Action PR comment with preview links](./images/github_action_comment.png)
 5. **Open the Vercel preview** and interact with the UI, then inspect the Network tab—you should see calls proxying to `https://backend-api--backend-pr-<n>.sb.signadot.com`.  
    ![Frontend hitting sandbox URL](./images/frontend_page_online_ping.png)
 
