@@ -1,128 +1,74 @@
 # Tutorial: Connect Vercel Previews to Signadot Sandboxes for Full-Stack Preview Environments
 
-Modern frontend teams rely heavily on Vercel Preview Deployments to validate UI changes. However, there's an inherent limitation: Vercel previews almost always point to a static backend (staging/production), which breaks when a frontend PR depends on a backend change.
+Modern Vercel Preview Deployments rarely track backend changes. When a frontend pull request (PR) depends on a backend update, reviewers end up testing against stale APIs. This tutorial shows how to pair every Vercel preview with its own Signadot sandbox so that each frontend PR runs against its matching backend build.
 
-This tutorial provides a hands-on guide to building an automated system that:
-- Creates isolated Signadot sandboxes for each frontend PR
-- Automatically connects Vercel previews to the corresponding backend sandbox
-- Enables full-stack testing in ephemeral environments
-
-**Time required:** 30-45 minutes
-
-> **Note:** The configuration files and code referenced in this guide can be found in the following repository:  
-> https://github.com/signadot/examples/tree/main/vercel-preview-signadot-sandoxes-cicd-connection
+**Time required:** 30-45 minutes  
+**Repository:** https://github.com/signadot/examples/tree/main/vercel-preview-signadot-sandoxes-cicd-connection
 
 ---
 
 ## Prerequisites
 
-Before starting, ensure you have:
+- GitHub repositories (separate frontend/backend or a monorepo)
+- Vercel account with a project linked to the frontend repo
+- Signadot account with an API key, organization, and registered Kubernetes cluster (EKS or GKE Standard)
+- Kubernetes cluster with the Signadot Operator installed
+- Container registry credentials (Docker Hub/GHCR/GCR)
 
-1. **GitHub Account** with two repositories (or a monorepo):
-   - Frontend repository (Next.js application)
-   - Backend repository (Node.js/Express API)
+> Signadot Operator does not run on GKE Autopilot. Use GKE Standard or AWS EKS.
 
-2. **Vercel Account** with:
-   - A project connected to your frontend repository
-   - API token for GitHub Actions
+---
 
-3. **Signadot Account** with:
-   - API key
-   - Organization name
-   - Kubernetes cluster registered (AWS EKS, GKE Standard, or other supported cluster)
+## Step 1: Configure the Application
 
-4. **Kubernetes Cluster** with:
-   - Backend deployment already running
-   - Signadot Operator installed (or install via workflow)
+### 1.1 Backend: expose a sandbox-friendly service
 
-5. **Container Registry** (Docker Hub, GHCR, or GCR):
-   - Account with push permissions
+The example backend (`backend/`) is a minimal Express app that ships with Kubernetes manifests. Before deploying, update the image placeholder inside `k8s/deployment.yaml`:
 
-> **Note:** Signadot Operator cannot run on GKE Autopilot. Use GKE Standard or AWS EKS.
-
-## Architecture Overview
-
-The integration works as follows:
-
-```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│  Frontend PR    │───▶│  GitHub Actions │───▶│  Signadot       │
-│  (Vercel)       │    │  Workflow       │    │  Sandbox        │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                              │
-                              ▼
-                       ┌──────────────────┐
-                       │  Vercel Preview  │
-                       │  (with sandbox   │
-                       │   URL injected)  │
-                       └──────────────────┘
+```yaml
+containers:
+  - name: vercel-signadot-backend
+    image: YOUR_REGISTRY/vercel-signadot-backend:latest
 ```
 
-### Workflow Steps
-
-1. **Developer opens PR** on frontend repository
-2. **GitHub Actions triggers** the preview workflow
-3. **Backend code is checked out** from the repository
-4. **Docker image is referenced** (from backend CI workflow)
-5. **Signadot sandbox is created** with the backend image
-6. **Sandbox URL is extracted** (e.g., `https://backend-api--backend-pr-5.sb.signadot.com` or `https://backend-api--backend-pr-5.preview.signadot.com`)
-7. **Vercel preview is deployed** with sandbox URL as `NEXT_PUBLIC_API_URL`
-8. **PR comment is posted** with both frontend and backend preview URLs
-
-## Step 1: Prepare the Backend
-
-### 1.1. Deploy the Baseline Backend
-
-First, deploy your backend to Kubernetes. The example includes minimal backend code in the `backend/` directory.
-
-**Before deploying, update the image reference:**
-
-1. Open `k8s/deployment.yaml` (or `backend/k8s/deployment.yaml`)
-2. Replace `YOUR_REGISTRY` with your container registry (e.g., `docker.io/username` or `ghcr.io/username`)
-3. The image line should look like: `image: docker.io/username/vercel-signadot-backend:latest`
-
-**Deploy to Kubernetes:**
+Replace `YOUR_REGISTRY` with something like `docker.io/username` and apply the manifests:
 
 ```bash
-# Apply the Kubernetes manifests
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
-
-# Verify the deployment
-kubectl get deployment vercel-signadot-backend -n default
-kubectl get service vercel-signadot-backend -n default
 ```
 
-### 1.2. Create sandbox.yaml
+#### sandbox.yaml
 
-The `backend/sandbox.yaml` file defines how Signadot creates sandboxes. See `backend/sandbox.yaml` for the complete configuration.
+`backend/sandbox.yaml` controls how Signadot clones the baseline deployment. You only need to edit placeholders such as `DOCKERHUB_USERNAME`, `SANDBOX_IMAGE_TAG`, and `PR_NUMBER`. The important bits are:
 
-**Key points:**
-- The `defaultRouteGroup.endpoints` section is **required** for Signadot to generate preview URLs
-- The image reference will be replaced by the workflow during CI
-- The sandbox name will be replaced with a PR-specific name
+```yaml
+name: backend-pr-PR_NUMBER
+workloads:
+  - name: vercel-signadot-backend
+    source:
+      kind: kubernetes
+      name: vercel-signadot-backend
+    patches:
+      - op: replace
+        path: spec/template/spec/containers/0/image
+        value: docker.io/DOCKERHUB_USERNAME/vercel-signadot-backend:SANDBOX_IMAGE_TAG
+defaultRouteGroup:
+  endpoints:
+    - name: backend-api
+      port: 8080
+```
 
-## Step 2: Prepare the Frontend
+Signadot uses `defaultRouteGroup` to mint URLs like `https://backend-api--backend-pr-123.sb.signadot.com`.
 
-### 2.1. Configure API URL Handling
+### 1.2 Frontend: read the sandbox URL at build time
 
-The frontend uses `src/lib/config/api.ts` to handle API requests. This file:
-- Automatically routes Signadot URLs through a Next.js API proxy (keeps API key server-side)
-- Makes direct requests for non-Signadot URLs (production/local)
+The frontend consumes whatever backend URL the workflow injects into `NEXT_PUBLIC_API_URL`.
 
-See `frontend/src/lib/config/api.ts` for the implementation.
+- `frontend/src/lib/config/api.ts` decides whether to call the backend directly or through the proxy route.
+- `frontend/src/app/api/proxy/[...path]/route.ts` keeps the `SIGNADOT_API_KEY` server-side and forwards requests to the sandbox URL.
 
-### 2.2. Create API Proxy Route
-
-The `src/app/api/proxy/[...path]/route.ts` file handles Signadot authentication server-side. This ensures the `SIGNADOT_API_KEY` is never exposed to the client browser.
-
-See `frontend/src/app/api/proxy/[...path]/route.ts` for the implementation.
-
-**Security Note:** Never use `NEXT_PUBLIC_SIGNADOT_API_KEY` - this would expose the key to the client. Always use `SIGNADOT_API_KEY` (without `NEXT_PUBLIC_` prefix) and route requests through the API proxy.
-
-### 2.3. Use the API Configuration
-
-In your components, use the API configuration:
+Example usage from `BackendStatus.tsx`:
 
 ```typescript
 import { getApiUrl, getApiHeaders } from '@/lib/config/api';
@@ -132,211 +78,101 @@ const response = await fetch(getApiUrl('/health'), {
 });
 ```
 
-The example includes a `BackendStatus` component (`frontend/src/components/BackendStatus.tsx`) that demonstrates this pattern.
+Never expose `SIGNADOT_API_KEY` via `NEXT_PUBLIC_*`. The proxy route adds the header on the server before relaying traffic to `*.sb.signadot.com`.
 
-## Step 3: Set Up Backend CI Workflow
+---
 
-Create `.github/workflows/ci.yml` in your **backend** repository. The example workflow is in `backend/.github/workflows/ci.yml`.
+## Step 2: Create the GitHub Workflows
 
-**Key features:**
-- Builds Docker images on PR and push events
-- Tags images with branch name + SHA, short SHA, and `latest` (on default branch)
-- Pushes to configurable registry (Docker Hub, GHCR, GCR)
+### 2.1 Backend CI (`backend/.github/workflows/ci.yml`)
 
-## Step 4: Set Up Frontend Preview Workflow
+This job builds the backend image on every PR/push, tags it, and pushes to your registry. Highlights:
 
-Create `.github/workflows/vercel-preview.yml` in your **frontend** repository. The example workflow is in `frontend/.github/workflows/vercel-preview.yml`.
+- Logs in using `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`
+- Builds multi-tag images (`branch-sha`, `sha`, and `latest` on default branch)
+- Publishes to the registry so sandboxes can pull the exact image associated with a frontend PR
 
-**On a `pull_request` trigger, the workflow:**
+Copy the workflow from this repo, then configure the `REGISTRY`, `DOCKERHUB_USERNAME`, and `DOCKERHUB_TOKEN` secrets in the backend repository.
 
-1. **Checkout** code (both frontend and backend repositories)
-2. **Create Signadot Sandbox:** Uses the Signadot CLI to spin up a sandbox for the backend
-   - **Note:** This implementation uses `signadot` CLI directly rather than `signadot/sandbox-action` GitHub Action
-   - The workflow checks out the backend repo and applies the `sandbox.yaml` configuration
-3. **Get Sandbox URL:** Captures the `sandbox-url` output using `signadot sandbox get -o json`
-   - The URL format is typically `https://<endpoint>--<sandbox-name>.sb.signadot.com` or `.preview.signadot.com`
-4. **Deploy Vercel Preview:** Uses `amondnet/vercel-action` to deploy the frontend
-   - **Note:** This implementation uses `amondnet/vercel-action@v25` rather than `vercel/action`
-5. **Inject the URL:** Passes the sandbox URL as a build-time environment variable:
-   ```yaml
-   vercel-args: '--build-env NEXT_PUBLIC_API_URL=${{ steps.sandbox.outputs.sandbox-url }}'
-   ```
-   This ensures `NEXT_PUBLIC_API_URL` is available during the Next.js build process.
+### 2.2 Frontend preview workflow (`frontend/.github/workflows/vercel-preview.yml`)
 
-## Step 5: Configure GitHub Secrets
+Triggered on `pull_request`, it performs the following:
 
-### Frontend Repository Secrets
+1. **Checkout repos** – pulls both frontend and backend sources (backend repo name comes from the `BACKEND_REPO` secret).
+2. **Authenticate to AWS** – obtains kubeconfig for the EKS cluster that hosts the baseline deployment.
+3. **Create/refresh Signadot Operator** – ensures the operator is present before creating a sandbox.
+4. **Prepare sandbox manifest** – rewrites placeholders in `backend/sandbox.yaml` (PR number, cluster name, registry).
+5. **Create sandbox** – runs `signadot sandbox apply` and captures the resulting URL via `signadot sandbox get -o json`.
+6. **Deploy to Vercel** – calls `amondnet/vercel-action@v25` with `NEXT_PUBLIC_API_URL` set to the sandbox URL.
 
-Add these secrets to your **frontend repository**:
+Key snippet (simplified):
 
-#### Vercel Secrets
-- `VERCEL_TOKEN` - Your Vercel API token
-- `VERCEL_ORG_ID` - Your Vercel organization ID
-- `VERCEL_PROJECT_ID` - Your Vercel project ID
+```yaml
+- name: Create Signadot Sandbox
+  run: |
+    signadot sandbox apply \
+      --file backend/sandbox.yaml \
+      --org "$SIGNADOT_ORG" \
+      --name backend-pr-${{ github.event.number }}
+- name: Deploy Vercel Preview
+  uses: amondnet/vercel-action@v25
+  with:
+    vercel-args: '--build-env NEXT_PUBLIC_API_URL=${{ steps.sandbox.outputs.sandbox-url }}'
+```
 
-#### Signadot Secrets
-- `SIGNADOT_API_KEY` - Your Signadot API key
-- `SIGNADOT_ORG` - Your Signadot organization name
+Secrets needed in the **frontend** repo:
 
-#### Backend Repository Access
-- `BACKEND_REPO` - Full repository name (e.g., `owner/vercel-signadot-backend`)
-- `GH_PAT` - GitHub Personal Access Token with `repo` scope
+- `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`
+- `SIGNADOT_API_KEY`, `SIGNADOT_ORG`
+- `BACKEND_REPO`, `GH_PAT` (for cross-repo checkout)
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_EKS_CLUSTER_NAME`
+- `DOCKERHUB_USERNAME` (to rewrite image references)
 
-#### AWS Secrets (for EKS cluster access)
-- `AWS_ACCESS_KEY_ID` - AWS access key
-- `AWS_SECRET_ACCESS_KEY` - AWS secret key
-- `AWS_REGION` - AWS region (e.g., `eu-north-1`)
-- `AWS_EKS_CLUSTER_NAME` - Name of your EKS cluster
+---
 
-#### Docker Hub Secrets
-- `DOCKERHUB_USERNAME` - Docker Hub username
+## Step 3: See It Work
 
-### Backend Repository Secrets
+1. Push a branch in the frontend repo and open a PR.
+2. Watch the `vercel-preview.yml` workflow:
+   - Backend repo is checked out and `sandbox.yaml` is rewritten.
+   - Signadot sandbox spins up using the image built by backend CI.
+   - Vercel deploys with `NEXT_PUBLIC_API_URL` equal to the sandbox endpoint.
+3. The workflow (or Vercel bot) comments on the PR with the preview URL.
+4. Open the Vercel preview, inspect DevTools → Network, and verify calls go through `/api/proxy/*` to `https://backend-api--backend-pr-<n>.sb.signadot.com`.
 
-Add these secrets to your **backend repository**:
+You now have an isolated backend per frontend PR, so reviewers interact with exactly the code under review.
 
-#### Container Registry Secrets
-- `REGISTRY` - Docker registry URL (e.g., `docker.io`, `ghcr.io`)
-- `DOCKERHUB_USERNAME` - Registry username (must match frontend's `DOCKERHUB_USERNAME`)
-- `DOCKERHUB_TOKEN` - Registry access token for pushing images
-
-## Step 6: Test the Integration
-
-1. **Create a new branch** in your frontend repository
-2. **Open a Pull Request** - This triggers the GitHub Action workflow
-3. **Watch the GitHub Action run** - In the Actions tab, you'll see:
-   - The workflow checking out code
-   - Creating the Signadot Sandbox
-   - Deploying to Vercel
-   - Commenting on the PR
-4. **Check the PR comments** - You'll see a comment with:
-   - Frontend Preview URL (Vercel)
-   - Backend Sandbox URL (Signadot)
-5. **Click the Vercel Preview link** - Opens your frontend preview in the browser
-6. **Open Developer Tools** (F12) → **Network tab**
-7. **Interact with your app** - Make API calls, navigate pages, etc.
-8. **Verify network requests** - You should see requests going to `/api/proxy/*` (the Next.js API proxy route) which then forwards to the Signadot preview URL server-side. In the Network tab, you'll see requests successfully hitting the unique `.sb.signadot.com` or `.preview.signadot.com` sandbox URL.
-
-**Expected Result:** If configured correctly, your frontend will be talking only to the sandbox backend for that PR. All API requests will route through the Next.js API proxy (`/api/proxy/*`) which adds the `signadot-api-key` header server-side before forwarding to the Signadot preview URL (`https://*.sb.signadot.com` or `https://*.preview.signadot.com`).
-
-**Verify in Network Tab:** Open browser DevTools (F12) → Network tab. You should see requests successfully hitting the unique `.sb.signadot.com` or `.preview.signadot.com` sandbox URL.
-
-![Successful Frontend Job](./images/successful_frontend_job.png)
-
-![Successful Backend Workflow](./images/successful_backend_workflow.png)
-
-![Frontend Page Online](./images/frontend_page_online_ping.png)
+---
 
 ## Troubleshooting
 
-### Sandbox cannot be created
+- **Sandbox creation fails**
+  - Confirm the baseline deployment exists: `kubectl get deployment vercel-signadot-backend`.
+  - Ensure the Signadot Operator is healthy: `kubectl get pods -n signadot`.
+  - Verify the image tag produced by backend CI exists in your registry.
 
-**Check:**
-- Base deployment exists: `kubectl get deployment vercel-signadot-backend -n default`
-- Operator is installed: `kubectl get pods -n signadot`
-- Image exists in registry
-- `sandbox.yaml` has `defaultRouteGroup.endpoints` section
+- **Vercel preview loads but API calls fail**
+  - Check that `NEXT_PUBLIC_API_URL` shows up in the Vercel build logs.
+  - Ensure `SIGNADOT_API_KEY` is configured as a Vercel secret (no `NEXT_PUBLIC_`).
+  - Confirm `/api/proxy/[...path]` exists in the deployed bundle.
 
-### Vercel preview builds but API calls fail
+- **401/403 from Signadot endpoints**
+  - Make sure requests route through the proxy (look for `/api/proxy/health` in Network tab).
+  - Retry `curl https://<preview>/api/proxy/health` locally; if it fails, verify the `signadot-api-key` header is sent server-side.
 
-**Check:**
-- `NEXT_PUBLIC_API_URL` is injected into Vercel build (check build logs)
-- `SIGNADOT_API_KEY` is set as runtime environment variable (without `NEXT_PUBLIC_` prefix)
-- API proxy route (`/api/proxy/[...path]`) exists and is working
-- Backend service is running in the sandbox
-
-### API calls to Signadot preview URLs fail with authentication errors
-
-**Symptom:** Requests return 401/403 errors.
-
-**Solution:**
-1. Ensure `SIGNADOT_API_KEY` is set in Vercel environment variables (without `NEXT_PUBLIC_` prefix)
-2. Verify the API proxy route exists and is working
-3. Check that your code uses `getApiUrl()` from `@/lib/config/api`
-4. Test the API proxy route directly: `curl https://your-vercel-preview.vercel.app/api/proxy/health`
-
-**Important:** Never use `NEXT_PUBLIC_SIGNADOT_API_KEY` - this exposes the key to the client.
-
-### Backend Image Not Found
-
-**Check:**
-- Backend CI workflow has run and built the image
-- Image exists in the registry
-- Image tag matches what's referenced in sandbox.yaml
-- Registry permissions are correct
-
-### AWS EKS Access Issues
-
-**Check:**
-- AWS credentials are correct
-- IAM user/role has `eks:DescribeCluster` and `eks:ListClusters` permissions
-- Cluster name matches `AWS_EKS_CLUSTER_NAME` secret
-- Region matches `AWS_REGION` secret
-
-## Security Best Practices
-
-### API Key Security
-
-**Critical:** Never use `NEXT_PUBLIC_*` prefix for sensitive API keys. Variables with this prefix are bundled into client-side JavaScript and are visible in:
-- Browser DevTools
-- Network request headers
-- Source code inspection
-
-**Correct Approach:**
-- Use `NEXT_PUBLIC_API_URL` for the backend URL (safe to expose)
-- Use `SIGNADOT_API_KEY` (without `NEXT_PUBLIC_`) for the API key (server-side only)
-- Route Signadot requests through Next.js API proxy (`/api/proxy/[...path]`)
-- The proxy adds the `signadot-api-key` header server-side before forwarding requests
-
-## Project Structure
-
-```
-vercel-preview-signadot-sandoxes-cicd-connection/
-├── backend/
-│   ├── .github/
-│   │   └── workflows/
-│   │       └── ci.yml              # Backend CI workflow
-│   ├── server.js                  # Express server
-│   ├── config.js                  # Configuration
-│   ├── package.json
-│   ├── Dockerfile
-│   └── sandbox.yaml               # Signadot sandbox configuration
-├── frontend/
-│   ├── .github/
-│   │   └── workflows/
-│   │       └── vercel-preview.yml # Frontend preview workflow
-│   ├── src/
-│   │   ├── app/
-│   │   │   ├── api/
-│   │   │   │   └── proxy/
-│   │   │   │       └── [...path]/
-│   │   │   │           └── route.ts  # API proxy route
-│   │   │   ├── page.tsx
-│   │   │   └── layout.tsx
-│   │   ├── lib/
-│   │   │   └── config/
-│   │   │       └── api.ts         # API configuration
-│   │   └── components/
-│   │       └── BackendStatus.tsx  # Backend status component
-│   └── package.json
-├── k8s/
-│   ├── deployment.yaml            # Kubernetes deployment
-│   └── service.yaml                # Kubernetes service
-├── .signadot/
-│   └── sandbox-template.yaml      # Sandbox template
-└── README.md
-```
+---
 
 ## Conclusion
 
-You now have a fully automated full-stack preview environment combining:
-- **Vercel** for frontend previews
-- **Signadot** for sandbox backends
-- **GitHub Actions** for orchestration
+By pairing Vercel previews with Signadot sandboxes:
 
-Every frontend PR gets its own backend. Every reviewer gets reliable, isolated environments.
+- Every frontend PR is validated against the matching backend build.
+- Reviewers receive URLs that reflect their exact code changes.
+- GitHub Actions orchestrates the entire flow without manual steps.
 
-## Additional Resources
+Clone this repository, customize the placeholders, and you will have dependable full-stack preview environments in under an hour.
+
+### Additional Resources
 
 - [Signadot Documentation](https://www.signadot.com/docs)
 - [Vercel Preview Deployments](https://vercel.com/docs/deployments/preview-deployments)
