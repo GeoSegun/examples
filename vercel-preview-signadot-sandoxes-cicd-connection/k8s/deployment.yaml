@@ -1,4 +1,3 @@
-# * Kubernetes Deployment for vercel-signadot-backend
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,18 +17,16 @@ spec:
     spec:
       containers:
         - name: backend
-          # * Image will be overridden by Signadot sandbox
+          # Image will be overridden by Signadot sandbox
           image: YOUR_REGISTRY/vercel-signadot-backend:latest
           imagePullPolicy: Always
-          # * Explicit command to start the server
-          # * Ensures the server starts correctly when forked by Signadot
+          # Explicit command required for Signadot sandbox forks
           command: ["node", "server.js"]
           ports:
             - name: http
               containerPort: 3000
               protocol: TCP
           env:
-            # * Only PORT is configurable via environment
             - name: PORT
               value: "3000"
           livenessProbe:
@@ -55,4 +52,3 @@ spec:
             limits:
               memory: "128Mi"
               cpu: "100m"
-
