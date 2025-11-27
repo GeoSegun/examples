@@ -5,9 +5,7 @@ import { getApiUrl, getApiHeaders } from '@/lib/config/api';
 
 /**
  * Backend status indicator component
- * * Checks backend health endpoint and displays status
- * * Automatically polls every 30 seconds
- * * Shows loading state while checking
+ * Polls health endpoint every 30 seconds
  */
 export default function BackendStatus() {
   const [status, setStatus] = useState<'checking' | 'online' | 'offline'>('checking');
@@ -19,7 +17,6 @@ export default function BackendStatus() {
       setStatus('checking');
       setError(null);
 
-      // * Create AbortController for timeout handling
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
 
@@ -47,7 +44,6 @@ export default function BackendStatus() {
     } catch (err) {
       setStatus('offline');
       if (err instanceof Error) {
-        // * Handle timeout and network errors
         if (err.name === 'AbortError') {
           setError('Request timeout');
         } else {
@@ -59,12 +55,8 @@ export default function BackendStatus() {
     }
   };
 
-  // * Check status on mount and set up polling
   useEffect(() => {
-    // * Initial check
     checkBackendStatus();
-
-    // * Poll every 30 seconds
     const interval = setInterval(() => {
       checkBackendStatus();
     }, 30000);
@@ -141,4 +133,3 @@ export default function BackendStatus() {
     </div>
   );
 }
-
