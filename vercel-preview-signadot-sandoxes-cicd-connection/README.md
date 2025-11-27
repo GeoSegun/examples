@@ -9,8 +9,8 @@ This tutorial provides a hands-on guide to building an automated system that:
 
 **Time required:** 30-45 minutes
 
-> **Note:** The configuration files and code referenced in this guide can be found in this repository.  
-> The example includes minimal but working frontend and backend codebases.
+> **Note:** The configuration files and code referenced in this guide can be found in the following repository:  
+> https://github.com/signadot/examples/tree/main/vercel-preview-signadot-sandoxes-cicd-connection
 
 ---
 
